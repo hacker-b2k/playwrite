@@ -56,6 +56,9 @@ import type * as api from '../../types/types';
 import type { ByRoleOptions } from '@isomorphic/locatorUtils';
 import type { URLMatch } from '@isomorphic/urlMatch';
 import type * as channels from '@protocol/channels';
+import { aiEngine } from '../server/ai/aiEngine';
+import { aiContextBuilder } from '../server/ai/aiContext';
+import { aiActionExecutor } from '../server/ai/aiActions';
 
 type PDFOptions = Omit<channels.PagePdfParams, 'width' | 'height' | 'margin'> & {
   width?: string | number,
@@ -882,6 +885,78 @@ export class Page extends ChannelOwner<channels.PageChannel> implements api.Page
 
   async _setDockTile(image: Buffer) {
     await this._channel.setDockTile({ image });
+  }
+
+  // ─── AI METHODS (AutoCompute) ─────────────────────────────────────────────
+
+  /**
+   * AI se browser action karwao — natural language command dein
+   * Example: await page.aiDo("click the login button")
+   * Example: await page.aiDo("search for playwright on google")
+   */
+  async aiDo(command: string, options?: { model?: string; screenshot?: boolean }): Promise<{ success: boolean; actionsExecuted: number; message?: string; error?: string }> {
+    // Page context collect karo
+    const ctx = await aiContextBuilder.buildContext(this, options?.screenshot ?? false);
+
+    // AI se actions mangwao
+    const response = await aiEngine.chatWithRetry([
+      { role: 'system', content: aiContextBuilder.buildSystemPrompt() },
+      { role: 'user', content: aiContextBuilder.buildUserPrompt(command, ctx) },
+    ], { model: options?.model });
+
+    // Actions parse aur execute karo
+    const actions = aiActionExecutor.parseActions(response.content);
+    const result = await aiActionExecutor.execute(this, actions);
+    return {
+      success: result.success,
+      actionsExecuted: result.actionsExecuted,
+      message: result.message,
+      error: result.error,
+    };
+  }
+
+  /**
+   * Page ke baare mein AI se sawal poocho
+   * Example: const ans = await page.aiAsk("How many products are listed?")
+   * Example: const price = await page.aiAsk("What is the price of the first item?")
+   */
+  async aiAsk(question: string, options?: { screenshot?: boolean }): Promise<string> {
+    const ctx = await aiContextBuilder.buildContext(this, options?.screenshot ?? false);
+    const response = await aiEngine.chatWithRetry([
+      { role: 'user', content: aiContextBuilder.buildAskPrompt(question, ctx) },
+    ]);
+    return response.content;
+  }
+
+  /**
+   * Page se structured data extract karo using AI
+   * Example: const data = await page.aiExtract({ title: 'string', price: 'string', inStock: 'boolean' })
+   */
+  async aiExtract<T = Record<string, unknown>>(schema: Record<string, string>, prompt?: string): Promise<T> {
+    const ctx = await aiContextBuilder.buildContext(this, false);
+    const response = await aiEngine.chatWithRetry([
+      { role: 'user', content: aiContextBuilder.buildExtractPrompt(schema, ctx, prompt) },
+    ]);
+
+    // JSON extract karo response se
+    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error(`AI did not return valid JSON. Response: ${response.content.substring(0, 200)}`);
+    return JSON.parse(jsonMatch[0]) as T;
+  }
+
+  /**
+   * Screenshot lo aur AI se describe karwao (vision model)
+   * Example: const desc = await page.aiScreenshot("What buttons are visible?")
+   * Example: const desc = await page.aiScreenshot("Is there any error message?")
+   */
+  async aiScreenshot(prompt?: string): Promise<string> {
+    // Screenshot lo
+    const buffer = await this.screenshot({ type: 'png', fullPage: false });
+    const base64 = buffer.toString('base64');
+    const question = prompt || 'Describe what you see on this page in detail.';
+
+    // Vision model se analyze karwao
+    return await aiEngine.vision(question, base64, 'image/png');
   }
 }
 

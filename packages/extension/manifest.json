@@ -7,8 +7,13 @@
     "debugger",
     "activeTab",
     "tabs",
-    "tabGroups"
+    "tabGroups",
+    "sidePanel",
+    "storage"
   ],
+  "side_panel": {
+    "default_path": "aiSidebar.html"
+  },
   "host_permissions": [
     "<all_urls>"
   ],

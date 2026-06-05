@@ -241,6 +241,101 @@ export function decorateProgram(program: Command) {
 
   addTraceCommands(program, logErrorAndExit);
 
+  // ─── AI COMMAND (AutoCompute) ──────────────────────────────────────────────
+  program
+      .command('ai [instruction]')
+      .description('AI se browser automate karo (NVIDIA NIM powered)')
+      .option('--url <url>', 'Starting URL to open', '')
+      .option('--model <model>', 'AI model override', 'meta/llama-3.3-70b-instruct')
+      .option('--headed', 'Browser with visible UI')
+      .option('--screenshot', 'Take screenshot before each AI call')
+      .option('--interactive', 'Interactive REPL mode — type commands one by one')
+      .action(async function(instruction: string | undefined, options: any) {
+        const { aiEngine } = await import('../server/ai/aiEngine');
+        const { aiContextBuilder } = await import('../server/ai/aiContext');
+        const { aiActionExecutor } = await import('../server/ai/aiActions');
+        const { playwright } = await import('../inprocess');
+        const chromium = playwright.chromium;
+        const os = require('os');
+        const path = require('path');
+
+        // Temporary user data dir — normal window (incognito nahi), fresh profile
+        const userDataDir = path.join(os.tmpdir(), 'pw-ai-profile');
+
+        const startUrl = options.url || 'https://google.com';
+
+        // launchPersistentContext — normal window, incognito nahi
+        // URL seedha args mein pass karo taake blank tab na khule
+        const context = await chromium.launchPersistentContext(userDataDir, {
+          headless: !options.headed,
+          args: [
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-blink-features=AutomationControlled',
+            `--app=${startUrl}`,   // seedha URL pe open hoga, blank tab nahi
+          ],
+          ignoreDefaultArgs: ['--enable-automation'],
+          viewport: null,
+        });
+
+        // Pehla page lo — woh URL par hoga
+        const pages = context.pages();
+        const page = pages.length > 0 ? pages[0] : await context.newPage();
+
+        // Agar app mode se load nahi hua to manually navigate karo
+        if (!page.url().startsWith('http'))
+          await page.goto(startUrl, { waitUntil: 'load', timeout: 30000 });
+
+        // Single instruction mode
+        if (instruction) {
+          const ctx = await aiContextBuilder.buildContext(page, !!options.screenshot);
+          const response = await aiEngine.chatWithRetry([
+            { role: 'system', content: aiContextBuilder.buildSystemPrompt() },
+            { role: 'user', content: aiContextBuilder.buildUserPrompt(instruction, ctx) },
+          ], { model: options.model });
+          const actions = aiActionExecutor.parseActions(response.content);
+          const result = await aiActionExecutor.execute(page, actions);
+          console.log(`✅ Actions executed: ${result.actionsExecuted}`);
+          if (result.message) console.log(result.message);
+          if (result.error) console.error('❌ Error:', result.error);
+        }
+
+        // Interactive REPL mode
+        if (options.interactive) {
+          const readline = require('readline');
+          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+          const askNext = () => {
+            rl.question('\n🤖 AI Command (q to quit): ', async (input: string) => {
+              if (input.trim() === 'q') { await context.close(); rl.close(); return; }
+              try {
+                const activePage = context.pages().at(-1) || page;
+                const ctx = await aiContextBuilder.buildContext(activePage);
+                const response = await aiEngine.chatWithRetry([
+                  { role: 'system', content: aiContextBuilder.buildSystemPrompt() },
+                  { role: 'user', content: aiContextBuilder.buildUserPrompt(input, ctx) },
+                ]);
+                const actions = aiActionExecutor.parseActions(response.content);
+                const result = await aiActionExecutor.execute(activePage, actions);
+                console.log(`✅ Done (${result.actionsExecuted} actions)`);
+                if (result.message) console.log(result.message);
+              } catch (e: any) {
+                console.error('❌', e.message);
+              }
+              askNext();
+            });
+          };
+          askNext();
+        } else if (options.headed) {
+          // Headed mode — browser open rakho jab tak user band na kare
+          console.log('🌐 Browser open hai. Band karne ke liye Ctrl+C dabao.');
+          await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
+          await context.close().catch(() => {});
+        } else {
+          await context.close();
+        }
+      });
+  // ──────────────────────────────────────────────────────────────────────────
+
   program
       .command('cli', { hidden: true })
       .allowExcessArguments(true)

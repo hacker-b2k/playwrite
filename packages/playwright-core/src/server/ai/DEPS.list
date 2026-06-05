@@ -1,0 +1,4 @@
+[*]
+@isomorphic/**
+@utils/**
+../types.ts

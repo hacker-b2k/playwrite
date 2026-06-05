@@ -5,6 +5,7 @@
 ../package.ts
 ../protocol/
 ./
+./ai/
 ./codegen/
 ./har/
 ./recorder/

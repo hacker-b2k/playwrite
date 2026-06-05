@@ -44,7 +44,7 @@ export default defineConfig({
         emptyOutDir: false,
         minify: false,
         rollupOptions: {
-          input: ['src/ui/connect.html', 'src/ui/status.html'],
+          input: ['src/ui/connect.html', 'src/ui/status.html', 'src/ui/aiSidebar.html'],
           output: {
             manualChunks: undefined,
             entryFileNames: 'lib/ui/[name].js',
