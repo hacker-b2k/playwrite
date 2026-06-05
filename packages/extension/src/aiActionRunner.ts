@@ -98,7 +98,7 @@ export async function runActions(
 
         await chrome.tabs.update(tabId, { url: action.url });
         await waitForTabLoad(tabId);
-        await sleep(800); // DOM settle hone do
+        await sleep(1500); // YouTube DOM settle hone do
 
         const doneMsg = `✅ Opened: ${action.url}`;
         steps.push(doneMsg);

@@ -158,36 +158,31 @@ new PlaywrightExtension();
 import { parseActions, hasActions, runActions } from './aiActionRunner';
 
 const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
-const AI_MODEL = 'meta/llama-3.3-70b-instruct';
+const AI_MODEL = 'meta/llama-3.1-8b-instruct';
 
-// ─── System Prompt — AI ko actions format batao ───────────────────────────────
-const SYSTEM_PROMPT = `You are an AI browser automation assistant.
-When user gives a task/command, respond ONLY with a JSON array of browser actions.
-When user asks a question (not a task), respond with plain text answer.
+const SYSTEM_PROMPT = `You are a smart AI browser assistant. You can chat naturally AND automate the browser.
 
-Available actions for tasks:
+BROWSER TASKS → respond with JSON array only, no extra text:
 [
-  {"type": "navigate", "url": "https://example.com"},
-  {"type": "click", "selector": "text=Login"},
-  {"type": "click", "selector": "#submit-btn"},
-  {"type": "click", "selector": "aria=Search"},
-  {"type": "type", "selector": "placeholder=Search", "text": "hello world"},
-  {"type": "type", "selector": "input[name='q']", "text": "search term"},
-  {"type": "press", "key": "Enter"},
-  {"type": "scroll", "direction": "down"},
-  {"type": "scroll", "direction": "up"},
-  {"type": "wait", "ms": 1000},
-  {"type": "done", "message": "Task completed successfully!"}
+  {"type":"navigate","url":"https://..."},
+  {"type":"type","selector":"name=search_query","text":"..."},
+  {"type":"type","selector":"input[name=q]","text":"..."},
+  {"type":"click","selector":"button[aria-label='Search']"},
+  {"type":"click","selector":"a#video-title"},
+  {"type":"press","key":"Enter"},
+  {"type":"scroll","direction":"down"},
+  {"type":"wait","ms":1000},
+  {"type":"done","message":"Done!"}
 ]
 
-STRICT RULES:
-1. For TASKS: respond ONLY with JSON array, zero extra text
-2. For QUESTIONS: respond with plain text
-3. Use "text=ButtonText" to click buttons/links by their text
-4. Use "placeholder=..." for search boxes and input fields
-5. Always end tasks with {"type":"done","message":"..."}
-6. For YouTube search: navigate to youtube.com, then type in placeholder=Search, then press Enter
-7. For Google search: navigate to google.com, type in name=q, then press Enter`;
+YouTube search example:
+[{"type":"type","selector":"name=search_query","text":"SEARCH_TERM"},{"type":"press","key":"Enter"},{"type":"done","message":"Searched!"}]
+
+Google search example:
+[{"type":"navigate","url":"https://google.com"},{"type":"type","selector":"name=q","text":"SEARCH_TERM"},{"type":"press","key":"Enter"},{"type":"done","message":"Searched!"}]
+
+CHATTING / QUESTIONS → reply naturally, friendly, in user's language (Urdu/English/mix).
+JSON = zero extra text. Chat = conversational reply.`;
 
 // ─── API Key Helper ───────────────────────────────────────────────────────────
 
@@ -200,9 +195,13 @@ async function getApiKey(): Promise<string> {
 
 chrome.runtime.onMessage.addListener((msg: any, sender: chrome.runtime.MessageSender, sendResponse: (r: any) => void) => {
   if (msg.type === 'AI_COMMAND') {
-    handleAICommand(msg.command, sender.tab?.id)
-      .then(sendResponse)
-      .catch(err => sendResponse({ error: err.message }));
+    // Sidebar ka sender.tab undefined hota hai — active tab khud dhundho
+    getActiveTabId().then(activeTabId => {
+      const tabId = sender.tab?.id ?? activeTabId;
+      handleAICommand(msg.command, tabId)
+        .then(sendResponse)
+        .catch(err => sendResponse({ error: err.message }));
+    });
     return true;
   }
   if (msg.type === 'OPEN_AI_SIDEBAR') {
@@ -212,6 +211,12 @@ chrome.runtime.onMessage.addListener((msg: any, sender: chrome.runtime.MessageSe
   }
   return false;
 });
+
+/** Active tab ka ID return karo */
+async function getActiveTabId(): Promise<number | undefined> {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs[0]?.id;
+}
 
 // ─── Main AI Command Handler ──────────────────────────────────────────────────
 
@@ -241,13 +246,7 @@ async function handleAICommand(
     try {
       const ctx: any = await chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_CONTEXT' });
       if (ctx?.success) {
-        pageContext = [
-          `URL: ${ctx.url}`,
-          `Title: ${ctx.title}`,
-          `Inputs: ${JSON.stringify(ctx.inputs?.slice(0, 8))}`,
-          `Buttons: ${JSON.stringify(ctx.buttons?.slice(0, 12))}`,
-          `Page text: ${ctx.text?.substring(0, 1000)}`,
-        ].join('\n');
+        pageContext = `URL: ${ctx.url}\nTitle: ${ctx.title}\nInputs: ${JSON.stringify(ctx.inputs?.slice(0, 4))}\nButtons: ${JSON.stringify(ctx.buttons?.slice(0, 8))}`;
       }
     } catch {
       // Content script nahi mila — basic tab info use karo
@@ -273,14 +272,14 @@ async function handleAICommand(
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Current page:\n${pageContext || 'No page info'}\n\nUser command: "${command}"\n\nIf this is a task, respond with JSON actions array only. If a question, answer in plain text.`,
+            content: `Page: ${pageContext || 'unknown'}\n\nUser: ${command}`,
           },
         ],
-        max_tokens: 1024,
-        temperature: 0.1,
+        max_tokens: 512,
+        temperature: 0.2,
         stream: false,
       }),
-      signal: AbortSignal.timeout(60000),
+
     });
 
     if (!response.ok) {

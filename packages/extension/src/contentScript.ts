@@ -191,8 +191,16 @@ function findElement(selector: string): Element | null {
   try {
     const el = document.querySelector(selector);
     if (el && isVisible(el)) return el;
-    if (el) return el; // visible na ho tab bhi try karo
+    if (el) return el;
   } catch {}
+
+  // Strategy 1b: nth-child — "2nd link", "3rd video" handle karo
+  const nthMatch = selector.match(/^nth=(\d+)$/);
+  if (nthMatch) {
+    const n = parseInt(nthMatch[1]) - 1;
+    const links = Array.from(document.querySelectorAll('a#video-title, ytd-video-renderer a, h3 a')).filter(e => isVisible(e));
+    if (links[n]) return links[n];
+  }
 
   // Strategy 2: text= — button/link text match
   if (selector.startsWith('text=')) {
@@ -230,7 +238,8 @@ function findElement(selector: string): Element | null {
   // Strategy 5: name= — input name attribute
   if (selector.startsWith('name=')) {
     const name = selector.slice(5);
-    return document.querySelector(`[name="${name}"]`);
+    const el = document.querySelector(`[name="${name}"]`);
+    if (el) return el;
   }
 
   // Strategy 6: Fuzzy — koi bhi element jisme ye text ho
