@@ -38,6 +38,7 @@ export default defineConfig({
   root: resolve(__dirname, 'src/ui'),
   builder: {},
   environments: {
+    // ── UI bundle — React sidebar + connect/status pages ──────────────────────
     client: {
       build: {
         outDir: resolve(__dirname, 'dist/'),
@@ -54,6 +55,7 @@ export default defineConfig({
         }
       }
     },
+    // ── Service Worker bundle — background.ts ────────────────────────────────
     sw: {
       consumer: 'client',
       build: {
@@ -64,6 +66,22 @@ export default defineConfig({
           entry: resolve(__dirname, 'src/background.ts'),
           fileName: 'lib/background',
           formats: ['es']
+        }
+      }
+    },
+    // ── Content Script bundle — injected into every page ─────────────────────
+    // Must be IIFE format (not ES module) — Chrome content scripts require it
+    cs: {
+      consumer: 'client',
+      build: {
+        outDir: resolve(__dirname, 'dist/'),
+        emptyOutDir: false,
+        minify: false,
+        lib: {
+          entry: resolve(__dirname, 'src/contentScript.ts'),
+          fileName: () => 'lib/contentScript.js',
+          formats: ['iife'],
+          name: 'AutoComputeContentScript',
         }
       }
     }

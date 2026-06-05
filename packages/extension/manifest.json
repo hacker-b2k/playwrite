@@ -9,11 +9,20 @@
     "tabs",
     "tabGroups",
     "sidePanel",
-    "storage"
+    "storage",
+    "scripting"
   ],
   "side_panel": {
     "default_path": "aiSidebar.html"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib/contentScript.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "host_permissions": [
     "<all_urls>"
   ],

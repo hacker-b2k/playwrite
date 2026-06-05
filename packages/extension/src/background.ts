@@ -153,29 +153,59 @@ class PlaywrightExtension {
 new PlaywrightExtension();
 
 // ─── AI BROWSER ASSISTANT ─────────────────────────────────────────────────────
-// NVIDIA NIM API integration for AI sidebar commands
+// NVIDIA NIM API — sidebar commands ko browser actions mein convert karta hai
 
-// API config — user provides key via chrome.storage.local settings
+import { parseActions, hasActions, runActions } from './aiActionRunner';
+
 const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 const AI_MODEL = 'meta/llama-3.3-70b-instruct';
-const AI_TIMEOUT_MS = 30000;
 
-// Retrieve user-configured API key from extension storage
+// ─── System Prompt — AI ko actions format batao ───────────────────────────────
+const SYSTEM_PROMPT = `You are an AI browser automation assistant.
+When user gives a task/command, respond ONLY with a JSON array of browser actions.
+When user asks a question (not a task), respond with plain text answer.
+
+Available actions for tasks:
+[
+  {"type": "navigate", "url": "https://example.com"},
+  {"type": "click", "selector": "text=Login"},
+  {"type": "click", "selector": "#submit-btn"},
+  {"type": "click", "selector": "aria=Search"},
+  {"type": "type", "selector": "placeholder=Search", "text": "hello world"},
+  {"type": "type", "selector": "input[name='q']", "text": "search term"},
+  {"type": "press", "key": "Enter"},
+  {"type": "scroll", "direction": "down"},
+  {"type": "scroll", "direction": "up"},
+  {"type": "wait", "ms": 1000},
+  {"type": "done", "message": "Task completed successfully!"}
+]
+
+STRICT RULES:
+1. For TASKS: respond ONLY with JSON array, zero extra text
+2. For QUESTIONS: respond with plain text
+3. Use "text=ButtonText" to click buttons/links by their text
+4. Use "placeholder=..." for search boxes and input fields
+5. Always end tasks with {"type":"done","message":"..."}
+6. For YouTube search: navigate to youtube.com, then type in placeholder=Search, then press Enter
+7. For Google search: navigate to google.com, type in name=q, then press Enter`;
+
+// ─── API Key Helper ───────────────────────────────────────────────────────────
+
 async function getApiKey(): Promise<string> {
   const result = await chrome.storage.local.get('nvidia_api_key');
   return result['nvidia_api_key'] || '';
 }
 
-// AI command message listener — sidebar se messages receive karta hai
-chrome.runtime.onMessage.addListener((msg: any, sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) => {
+// ─── Message Listener ─────────────────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((msg: any, sender: chrome.runtime.MessageSender, sendResponse: (r: any) => void) => {
   if (msg.type === 'AI_COMMAND') {
-    handleAICommand(msg.command, sender.tab?.id).then(sendResponse).catch(err => {
-      sendResponse({ error: err.message || 'AI request failed' });
-    });
-    return true; // async response indicator
+    handleAICommand(msg.command, sender.tab?.id)
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
   }
   if (msg.type === 'OPEN_AI_SIDEBAR') {
-    // Open the AI sidebar panel for the requesting tab
     chrome.sidePanel.open({ tabId: sender.tab?.id! }).catch(() => {});
     sendResponse({ success: true });
     return true;
@@ -183,35 +213,54 @@ chrome.runtime.onMessage.addListener((msg: any, sender: chrome.runtime.MessageSe
   return false;
 });
 
+// ─── Main AI Command Handler ──────────────────────────────────────────────────
+
 /**
- * Handle AI command — gets tab context, sends to NVIDIA NIM API
- * @param command - User's natural language instruction
- * @param tabId - Active tab ID for context
+ * User ka command receive karta hai:
+ * 1. Page context content script se leta hai
+ * 2. NVIDIA NIM se JSON actions mangta hai
+ * 3. Actions browser pe execute karta hai
+ * 4. Steps + result sidebar ko bhejta hai
  */
-async function handleAICommand(command: string, tabId?: number): Promise<{ message: string }> {
-  // Verify API key is configured
+async function handleAICommand(
+  command: string,
+  tabId?: number
+): Promise<{ message: string; steps?: string[] }> {
+
+  // API key verify karo
   const apiKey = await getApiKey();
   if (!apiKey) {
-    throw new Error('NVIDIA API key not configured. Set it in extension settings (chrome.storage.local → nvidia_api_key).');
+    return {
+      message: '⚙️ API key missing!\nSidebar mein ⚙️ settings click karo aur apna NVIDIA API key save karo.',
+    };
   }
 
-  // Get active tab's URL and title for context
-  let tabContext = 'URL: unknown\nTitle: unknown';
+  // Tab ka live page context lo
+  let pageContext = '';
   if (tabId) {
     try {
-      const tab = await chrome.tabs.get(tabId);
-      tabContext = `URL: ${tab.url || 'unknown'}\nTitle: ${tab.title || 'unknown'}`;
+      const ctx: any = await chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_CONTEXT' });
+      if (ctx?.success) {
+        pageContext = [
+          `URL: ${ctx.url}`,
+          `Title: ${ctx.title}`,
+          `Inputs: ${JSON.stringify(ctx.inputs?.slice(0, 8))}`,
+          `Buttons: ${JSON.stringify(ctx.buttons?.slice(0, 12))}`,
+          `Page text: ${ctx.text?.substring(0, 1000)}`,
+        ].join('\n');
+      }
     } catch {
-      // Tab might not be accessible
+      // Content script nahi mila — basic tab info use karo
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        pageContext = `URL: ${tab.url || 'unknown'}\nTitle: ${tab.title || 'unknown'}`;
+      } catch {}
     }
   }
 
-  // AbortController for timeout — prevents hanging on network issues
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-
+  // NVIDIA NIM API call
+  let aiText = '';
   try {
-    // Call NVIDIA NIM API with chat completions endpoint
     const response = await fetch(`${NVIDIA_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -221,32 +270,57 @@ async function handleAICommand(command: string, tabId?: number): Promise<{ messa
       body: JSON.stringify({
         model: AI_MODEL,
         messages: [
-          {
-            role: 'system',
-            content: 'You are a helpful browser assistant. You can see the current page context. Respond helpfully and concisely. If the user asks you to perform actions, describe what actions should be taken.'
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Current page:\n${tabContext}\n\nUser command: ${command}`
+            content: `Current page:\n${pageContext || 'No page info'}\n\nUser command: "${command}"\n\nIf this is a task, respond with JSON actions array only. If a question, answer in plain text.`,
           },
         ],
         max_tokens: 1024,
-        temperature: 0.3,
+        temperature: 0.1,
         stream: false,
       }),
-      signal: controller.signal,
+      signal: AbortSignal.timeout(60000),
     });
 
-    // Handle API errors
     if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`AI API Error ${response.status}: ${errText}`);
+      const errText = await response.text().catch(() => '');
+      throw new Error(`API Error ${response.status}: ${errText.substring(0, 200)}`);
     }
 
-    // Parse and return AI response
     const data = await response.json() as any;
-    return { message: data.choices[0].message.content };
-  } finally {
-    clearTimeout(timeoutId);
+    aiText = data.choices?.[0]?.message?.content || '';
+
+  } catch (e: any) {
+    return { message: `❌ AI Error: ${e.message}` };
   }
+
+  // Plain text jawab hai (question tha)
+  if (!hasActions(aiText)) {
+    return { message: aiText };
+  }
+
+  // Actions parse karo
+  let actions;
+  try {
+    actions = parseActions(aiText);
+  } catch {
+    // Parse fail — plain text show karo
+    return { message: aiText };
+  }
+
+  // Tab nahi hai — explain karo
+  if (!tabId) {
+    return { message: `🤖 AI ne ye karna chahiye:\n${aiText}` };
+  }
+
+  // Actions execute karo content script ke zariye
+  const result = await runActions(tabId, actions);
+
+  return {
+    message: result.success
+      ? `✅ Complete! (${result.actionsExecuted} actions)`
+      : `❌ Failed: ${result.message}`,
+    steps: result.steps,
+  };
 }
